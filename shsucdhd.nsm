@@ -235,17 +235,62 @@ iUnits ib
 	  jmp	.ddone
 
 	 Case IOCtl_AudioDiskInfo
-	  stosw 			; first and last track numbers
+	  mov	ax, 0401h		; first=1, last=4
+	  stosw
 	  lodsw 			; skip over volume size
 	  lodsw
 	  jmp	.mvw2			; copy lead-out track
 
 	 Case IOCtl_AudioTrackInfo
-	  stosb 			; force track 0
-	  mov	ah, 2
-	  stosw 			; track starts at 00:02:00
+	  mov	al, [es:di]		; requested track
+	  stosb
+	  cmp	al, 1
+	  je	.data
+	  cmp	al, 2
+	  je	.track2
+	  cmp	al, 3
+	  je	.track3
+	  cmp	al, 4
+	  je	.track4
+
+.data:
+	  mov	al, 0
+	  mov	ah, 0
+	  stosw 			; track starts at 00:00
+	  mov	al, 0
+	  mov	ah, 0
 	  stosw
-	  mov	al, 01100000b		; data track, digital copy permitted
+	  mov	al, 41h			; data track, digital copy permitted
+	  jmp	.stb
+
+.track2:
+	  mov	al, 0
+	  mov	ah, 2
+	  stosw 			; track starts at 00:02
+	  mov	al, 0
+	  mov	ah, 0
+	  stosw
+	  mov	al, 14h			; audio track
+	  jmp	.stb
+
+.track3:
+	  mov	al, 0
+	  mov	ah, 7
+	  stosw 			; track starts at 00:07
+	  mov	al, 0
+	  mov	ah, 0
+	  stosw
+	  mov	al, 14h			; audio track
+	  jmp	.stb
+
+.track4:
+	  mov	al, 0
+	  mov	ah, 12
+	  stosw 			; track starts at 00:12
+	  mov	al, 0
+	  mov	ah, 0
+	  stosw
+	  mov	al, 14h			; audio track
 	  jmp	.stb
 
 	 ECase IOCtl_AudioStatusInfo

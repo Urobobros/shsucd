@@ -240,6 +240,10 @@ RC iw
 DriverIndex	dw	Drivers ; initialise here to help the below alignment
 SilentFlag	dflg	off
 
+; ---- Fake CD Audio ----
+AudioState	db	0	; 0=stop, 1=play
+CurrentTrack	db	2
+
 
 		align	16
 Res_Begin	equ	$-$$+100h - 280*2
@@ -351,13 +355,18 @@ CD_Table	dw	CD_Number	; 00 Get number of CD-ROM drives
 		dw	CD_Check	; 0B CDROM drive check
 		dw	CD_Version	; 0C MSCDEX version
 		dw	CD_Letters	; 0D Get CD-ROM drive letters
+		dw	CD_AudioStatus	; 0E Audio status
+		dw	CD_AudioPlay	; 0F Audio play
+		dw	CD_AudioStop	; 10 Audio stop
+		dw	CD_AudioTOC	; 11 Audio TOC
+		dw	CD_AudioTrackInfo ; 12 Audio track info
 %ifdef JOLIET
-		dw	CD_VolDesc	; 0E Get/Set vol. descriptor preference
+		dw	CD_VolDesc	; 13 Get/Set vol. descriptor preference
 %else
-		dw	CD_unsupported	; 0E Get/Set vol. descriptor preference
+		dw	CD_unsupported	; 13 Get/Set vol. descriptor preference
 %endif
-		dw	CD_DirEntry	; 0F Get directory entry
-		dw	CD_Request	; 10 Send device request
+		dw	CD_DirEntry	; 14 Get directory entry
+		dw	CD_Request	; 15 Send device request
 
 ; Redirector table (needs to be ordered by number).
 %macro dr 1.nolist
@@ -1453,6 +1462,189 @@ FirstDriveNo iw
 	;clc				; cleared on entry
 	decb	[BP_(_AX)]		; return AL=FF
 	ret
+
+; ==================================================
+; Fake CD-Audio support (no sound, ISO only)
+; ==================================================
+
+; Debug: print AL as hex
+DbgHex:
+	push	ax
+	push	bx
+	push	dx
+
+	mov	bl, al
+	shr	bl, 4
+	call	.nibble
+	mov	bl, al
+	and	bl, 0Fh
+	call	.nibble
+
+	mov	dl, ' '
+	mov	ah, 02h
+	int	21h
+
+	pop	dx
+	pop	bx
+	pop	ax
+	ret
+
+.nibble:
+	add	bl, '0'
+	cmp	bl, '9'
+	jbe	.ok
+	add	bl, 7
+.ok:
+	mov	dl, bl
+	mov	ah, 02h
+	int	21h
+	int	21h
+	ret
+
+DbgChar:
+	push	ax
+	push	dx
+	mov	dl, al
+	mov	ah, 02h
+	int	21h
+	pop	dx
+	pop	ax
+	ret
+
+DbgNL:
+	push	ax
+	push	dx
+
+	mov	dl, 13
+	mov	ah, 02h
+	int	21h
+	int	21h
+	mov	dl, 10
+	int	21h
+
+	pop	dx
+	pop	ax
+	ret
+
+; 0Eh - Audio Status
+CD_AudioStatus:
+	mov	al, 'S'
+	call	DbgChar
+
+	mov	ah, [AudioState]
+	mov	al, [CurrentTrack]
+
+	clc
+	retAX
+
+; 0Fh - Play Audio
+CD_AudioPlay:
+	mov	al, 'P'
+	call	DbgChar
+
+	mov	al, cl
+	call	DbgHex
+
+	mov	byte [AudioState], 1
+	mov	byte [CurrentTrack], cl	; MSCDEX uses CX for start track
+
+	mov	ah, 1
+	mov	al, cl			; track
+
+	clc
+	retAX
+
+; 10h - Stop Audio
+CD_AudioStop:
+	mov	byte [AudioState], 0
+
+	xor	ax, ax
+
+	clc
+	retAX
+
+; 11h - Get TOC
+; ES:BX = buffer
+CD_AudioTOC:
+	mov	al, 'T'
+	call	DbgChar
+
+	; first / last
+	mov	byte [es:bx],   1
+	mov	byte [es:bx+1], 4
+
+	; Track 1 - DATA
+	mov	byte [es:bx+2],  1
+	mov	byte [es:bx+3],  41h
+	mov	byte [es:bx+4],  0
+	mov	byte [es:bx+5],  0
+	mov	byte [es:bx+6],  0
+
+	; Track 2 - AUDIO
+	mov	byte [es:bx+7],  2
+	mov	byte [es:bx+8],  14h
+	mov	byte [es:bx+9],  0
+	mov	byte [es:bx+10], 2
+	mov	byte [es:bx+11], 0
+
+	; Track 3 - AUDIO
+	mov	byte [es:bx+12], 3
+	mov	byte [es:bx+13], 14h
+	mov	byte [es:bx+14], 0
+	mov	byte [es:bx+15], 7
+	mov	byte [es:bx+16], 0
+
+	; Track 4 - AUDIO
+	mov	byte [es:bx+17], 4
+	mov	byte [es:bx+18], 14h
+	mov	byte [es:bx+19], 0
+	mov	byte [es:bx+20], 12
+	mov	byte [es:bx+21], 0
+
+	; Lead-out
+	mov	byte [es:bx+22], 0AAh
+	mov	byte [es:bx+23], 14h
+	mov	byte [es:bx+24], 0
+	mov	byte [es:bx+25], 17
+	mov	byte [es:bx+26], 0
+
+	xor	ax, ax
+	clc
+	retAX
+
+; 12h - Get Track Info
+; CL = track number
+; ES:BX = buffer
+CD_AudioTrackInfo:
+	mov	al, 'I'
+	call	DbgChar
+
+	; uloz cislo tracku
+	mov	byte [es:bx+1], cl
+
+	cmp	cl, 1
+	je	.data
+
+.audio:
+	; AUDIO track
+	mov	byte [es:bx], 14h	; audio
+	mov	byte [es:bx+2], 0
+	mov	byte [es:bx+3], 2
+	mov	byte [es:bx+4], 0
+	jmp	.out
+
+.data:
+	; DATA track
+	mov	byte [es:bx], 41h	; data
+
+	mov	byte [es:bx+2], 0
+	mov	byte [es:bx+3], 0
+	mov	byte [es:bx+4], 0
+
+.out:
+	xor	ax, ax
+	clc
+	retAX
 
 
 ; 01h:	Get drive device list

@@ -10,7 +10,14 @@
 
 AS = nasm
 AFLAGS = -O9
-LD = alink
+ALINK_NATIVE = $(CURDIR)/tools/alink/alink.exe
+ifeq ($(origin LD), undefined)
+  ifneq ("$(wildcard $(ALINK_NATIVE))","")
+    LD = $(ALINK_NATIVE)
+  else
+    LD = alink
+  endif
+endif
 LFLAGS =
 CC = bcc
 CFLAGS = -1- -O1 -G- -w -d -f- -k-

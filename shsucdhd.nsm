@@ -114,6 +114,10 @@ struc DriveEntry
   .BaseOffset		resd	1	; byte offset of track start (INDEX 01)
   .SectorStride		resw	1	; bytes per sector in file (2048/2352)
   .DataOffset		resw	1	; data offset within sector (0/16)
+  .FirstTrack		resb	1
+  .LastTrack		resb	1
+  .TrackAttr		resb	100	; 0=audio, 0x40=data
+  .TrackLBA		resd	100	; track start LBA (INDEX 01)
 endstruc
 
 
@@ -238,17 +242,51 @@ iUnits ib
 	  jmp	.ddone
 
 	 Case IOCtl_AudioDiskInfo
-	  stosw 			; first and last track numbers
-	  lodsw 			; skip over volume size
-	  lodsw
-	  jmp	.mvw2			; copy lead-out track
+	  mov	al, [cs:si+DriveEntry.FirstTrack]
+	  mov	ah, [cs:si+DriveEntry.LastTrack]
+	  stosw
+	  mov	ax, [cs:si+DriveEntry.LeadOut]
+	  stosw
+	  mov	ax, [cs:si+DriveEntry.LeadOut+2]
+	  stosw
+	  jmp	.done
 
 	 Case IOCtl_AudioTrackInfo
-	  stosb 			; force track 0
-	  mov	ah, 2
-	  stosw 			; track starts at 00:02:00
+	  mov	al, [es:di]		; requested track number
+	  mov	bl, al
+	  cmp	al, [cs:si+DriveEntry.FirstTrack]
+	  jb	.badtrack
+	  cmp	al, [cs:si+DriveEntry.LastTrack]
+	  ja	.badtrack
+	  stosb				; return track number
+	  xor	bh, bh
+	  mov	cl, bl
+%ifdef i8086
+	  shl	bx, 1
+	  shl	bx, 1
+	  mov	ax, [cs:si+DriveEntry.TrackLBA+bx]
+	  mov	dx, [cs:si+DriveEntry.TrackLBA+bx+2]
+%else
+	  shl	bx, 2
+	  mov	eax, [cs:si+DriveEntry.TrackLBA+bx]
+%endif
+	  call	LBA2MSF
+	  call	WriteMSF
+	  mov	bl, cl
+	  xor	bh, bh
+	  mov	al, [cs:si+DriveEntry.TrackAttr+bx]
+	  and	al, 40h
+	  ifnz	al
+	   mov	al, 01100000b		; data track, digital copy permitted
+	  else
+	   xor	al, al			; audio track
+	  fi
+	  jmp	.stb
+.badtrack:
+	  xor	ax, ax
+	  stosb
 	  stosw
-	  mov	al, 01100000b		; data track, digital copy permitted
+	  stosw
 	  jmp	.stb
 
 	 ECase IOCtl_AudioStatusInfo
@@ -468,11 +506,20 @@ CueFlag			resb	1
 CueHasFile		resb	1
 CueHasTrack		resb	1
 CueHasIndex		resb	1
+CueHasAudio		resb	1
+CueCurTrack		resb	1
+CueFirstTrack		resb	1
+CueLastTrack		resb	1
 CueStride		resw	1
 CueDataOffset		resw	1
 CueBaseOffset		resd	1
 CueIndexFrames		resd	1
 FileSize		resd	1
+CueTrackAttr		resb	100
+CueTrackLBA		resd	100
+MSFMin			resb	1
+MSFSec			resb	1
+MSFFrame		resb	1
 
 section .text
 DOffset 		dw	Drive
@@ -711,7 +758,6 @@ RC	equ	$-4
 	  mov	[si+DriveEntry.SectorStride], ax
 	  mov	ax, [CueDataOffset]
 	  mov	[si+DriveEntry.DataOffset], ax
-	  call	vol2addr
 	  addw	[DOffset], DriveEntry_size
 	  incb	[Units]
 	  incb	[iUnits]
@@ -756,6 +802,67 @@ RC	equ	$-4
 	   movb [si+WarningPos+2], 'w'
 	  fi
 %endif
+%ifdef i8086
+	  mov	ax, [si+DriveEntry.VolSize]
+	  mov	dx, [si+DriveEntry.VolSize+2]
+	  call	vol2addr
+%else
+	  ifb	[CueHasAudio] ,ne, 0
+	   ldd	FileSize
+	   movzx	ebx, word [CueStride]
+	   xor	edx, edx
+	   div	ebx
+	   call	LBA2MSF
+	   mov	al, [MSFFrame]
+	   mov	ah, [MSFSec]
+	   mov	[si+DriveEntry.LeadOut], ax
+	   mov	al, [MSFMin]
+	   xor	ah, ah
+	   mov	[si+DriveEntry.LeadOut+2], ax
+	  else
+	   mov	eax, [si+DriveEntry.VolSize]
+	   call	vol2addr
+	  fi
+%endif
+	  ifb	[CueFlag] ,ne, 0
+	   mov	al, [CueFirstTrack]
+	   mov	[si+DriveEntry.FirstTrack], al
+	   mov	al, [CueLastTrack]
+	   mov	[si+DriveEntry.LastTrack], al
+	   push	es
+	   mov	ax, ds
+	   mov	es, ax
+	   push	si
+	   mov	di, si
+	   add	di, DriveEntry.TrackAttr
+	   mov	si, CueTrackAttr
+	   mov	cx, 100
+	   rep	movsb
+	   pop	si
+	   push	si
+	   mov	di, si
+	   add	di, DriveEntry.TrackLBA
+	   mov	si, CueTrackLBA
+%ifdef i8086
+	   mov	cx, 100*2
+	   rep	movsw
+%else
+	   mov	cx, 100
+	   rep	movsd
+%endif
+	   pop	si
+	   pop	es
+	  else
+	   movb	[si+DriveEntry.FirstTrack], 1
+	   movb	[si+DriveEntry.LastTrack], 1
+	   movb	[si+DriveEntry.TrackAttr+1], 40h
+%ifdef i8086
+	   movw	[si+DriveEntry.TrackLBA+4], 0
+	   movw	[si+DriveEntry.TrackLBA+6], 0
+%else
+	   mov	dword [si+DriveEntry.TrackLBA+4], 0
+%endif
+	  fi
 	  zero	bx
 	 fi
 	 ; close the file if error
@@ -871,6 +978,57 @@ vol2addr
 	 xchg	ah, al
 	 mov	[si+DriveEntry.LeadOut], ax	; seconds & frames
 	 return
+
+
+;+
+; FUNCTION : LBA2MSF
+;
+;	Convert LBA to MSF (with +150 lead-in) into MSFMin/MSFSec/MSFFrame.
+;
+; Parameters:
+;	EAX (or DX:AX) := LBA
+;-
+LBA2MSF
+%ifdef i8086
+	 add	ax, 150
+	 adc	dx, 0
+	 mov	cx, 75 * 60
+	 div	cx
+	 mov	[MSFMin], al
+	 xchg	ax, dx
+	 mov	cl, 75
+	 div	cl
+	 mov	[MSFSec], al
+	 mov	[MSFFrame], ah
+%else
+	 add	eax, 150
+	 xor	edx, edx
+	 mov	ecx, 75 * 60
+	 div	ecx
+	 mov	[MSFMin], al
+	 mov	eax, edx
+	 xor	edx, edx
+	 mov	ecx, 75
+	 div	ecx
+	 mov	[MSFSec], al
+	 mov	[MSFFrame], dl
+%endif
+	 ret
+
+
+;+
+; FUNCTION : WriteMSF
+;
+;	Write MSFMin/MSFSec/MSFFrame to ES:DI (4 bytes).
+;-
+WriteMSF
+	mov	al, [MSFFrame]
+	mov	ah, [MSFSec]
+	stosw
+	mov	al, [MSFMin]
+	xor	ah, ah
+	stosw
+	ret
 
 
 ;+
@@ -1504,13 +1662,40 @@ ParseCueLine
 	or	al, al
 	jz	.err
 	cmp	ax, 1
-	jne	.err
+	jb	.err
+	cmp	ax, 99
+	ja	.err
+	mov	[CueCurTrack], al
+	ifb	[CueFirstTrack] ,e, 0
+	 mov	[CueFirstTrack], al
+	fi
+	mov	[CueLastTrack], al
 	call	SkipSpaces
 	mov	di, CueType
 	call	ReadTokenUpper
 	or	al, al
 	jz	.err
 	mov	si, CueType
+	ifb	[si] ,e, 'A'
+	 ifb [si+1] ,e, 'U'
+	  ifb [si+2] ,e, 'D'
+	   ifb [si+3] ,e, 'I'
+	    ifb [si+4] ,e, 'O'
+	     sflg.	[CueHasAudio]
+	     mov	al, [CueCurTrack]
+	     mov	di, CueTrackAttr
+	     add	di, ax
+	     movb	[di], 0
+	     movw	[CueStride], 2352
+	     movw	[CueDataOffset], 16
+	     sflg.	[CueHasTrack]
+	     xor	al, al
+	     ret
+	    fi
+	   fi
+	  fi
+	 fi
+	fi
 	ifb	[si] ,e, 'M'
 	 ifb [si+1] ,e, 'O'
 	  ifb [si+2] ,e, 'D'
@@ -1527,13 +1712,16 @@ ParseCueLine
 	mov	al, 1
 	ret
 .mode:
-	mov	al, [si+6]
 	ifb	[si+6] ,e, '2'
 	 ifb [si+7] ,e, '3'
 	  ifb [si+8] ,e, '5'
 	   ifb [si+9] ,e, '2'
 	    movw	[CueStride], 2352
 	    movw	[CueDataOffset], 16
+	    mov	al, [CueCurTrack]
+	    mov	di, CueTrackAttr
+	    add	di, ax
+	    movb	[di], 40h
 	    sflg.	[CueHasTrack]
 	    xor	al, al
 	    ret
@@ -1545,8 +1733,16 @@ ParseCueLine
 	 ifb [si+7] ,e, '0'
 	  ifb [si+8] ,e, '4'
 	   ifb [si+9] ,e, '8'
+	    ifb	[CueHasAudio] ,ne, 0
+	     mov	al, 1
+	     ret
+	    fi
 	    movw	[CueStride], 2048
 	    zerow	[CueDataOffset]
+	    mov	al, [CueCurTrack]
+	    mov	di, CueTrackAttr
+	    add	di, ax
+	    movb	[di], 40h
 	    sflg.	[CueHasTrack]
 	    xor	al, al
 	    ret
@@ -1569,7 +1765,21 @@ ParseCueLine
 	call	ParseFrame
 	or	al, al
 	jz	.err
-	sflg.	[CueHasIndex]
+	mov	al, [CueCurTrack]
+	mov	di, CueTrackLBA
+	mov	bl, al
+	xor	bh, bh
+%ifdef i8086
+	shl	bx, 1
+	shl	bx, 1
+%else
+	shl	bx, 2
+%endif
+	add	di, bx
+	mmovd	di, CueIndexFrames
+	ifb	[CueCurTrack] ,e, 1
+	 sflg.	[CueHasIndex]
+	fi
 	xor	al, al
 	ret
 
@@ -1582,7 +1792,7 @@ ParseCueLine
 ;+
 ; FUNCTION : ParseCue
 ;
-;	Parse a data-only cue file (MODE1/2048 or MODE1/2352).
+;	Parse a cue file with MODE1/2048 or MODE1/2352 data and optional AUDIO tracks.
 ; Returns AL=0 on success, 1 invalid, 2 file not found.
 ;-
 ParseCue
@@ -1590,6 +1800,17 @@ ParseCue
 	zerob	[CueHasFile]
 	zerob	[CueHasTrack]
 	zerob	[CueHasIndex]
+	zerob	[CueHasAudio]
+	zerob	[CueCurTrack]
+	zerob	[CueFirstTrack]
+	zerob	[CueLastTrack]
+	mov	di, CueTrackAttr
+	mov	cx, 100
+	zero	ax
+	rep	stosb
+	mov	di, CueTrackLBA
+	mov	cx, 100*2
+	rep	stosw
 	mov	dx, FName
 	dos	3dc0h
 	jc	.nofile
